@@ -43,7 +43,11 @@
   if (hash) history.replaceState(null, "", location.pathname);
   var p = {};
   hash.split("&").forEach(function (kv) { var i = kv.indexOf("="); if (i > 0) p[kv.slice(0, i)] = kv.slice(i + 1); });
-  if (!p.z) { erro("Esta página é aberta pelo botão Exportar dos relatórios do Power BI. Volte ao relatório e clique em Exportar."); return; }
+  if (!p.z) {
+    tit.textContent = "Download dos relatórios Power BI";
+    msg.textContent = "Esta página é aberta pelo botão Exportar CSV dos relatórios. Volte ao relatório e clique em Exportar.";
+    return;
+  }
 
   var nome = "exportacao.csv";
   try { nome = decodeURIComponent(p.n || nome).replace(/[\\/:*?"<>|]+/g, "_") || nome; } catch (e) { /* nome padrão */ }
