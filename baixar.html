@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Nenhuma conexão de rede é permitida: os dados chegam depois do "#" (que o navegador não envia a ninguém) e o arquivo é montado aqui mesmo -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Baixar arquivo · Power BI</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #071E38;
+         font-family: "Segoe UI", system-ui, sans-serif; color: #FFFFFF; }
+  .card { width: min(460px, calc(100vw - 32px)); box-sizing: border-box; padding: 26px 28px; border-radius: 14px;
+          background: linear-gradient(160deg, #0D2E55, #0A2342); border: 1px solid rgba(84, 181, 251, .16); box-shadow: 0 8px 24px rgba(0, 0, 0, .35); }
+  .logo { display: flex; align-items: flex-end; gap: 3px; height: 22px; margin-bottom: 14px; }
+  .logo i { width: 6px; border-radius: 2px; }
+  h1 { font-size: 18px; margin: 0 0 6px; }
+  p { font-size: 13px; color: #A8D4F5; margin: 4px 0; line-height: 1.5; word-break: break-word; }
+  .ok { color: #00FF18; } .erro { color: #FF5C7A; }
+  button { margin-top: 16px; font: inherit; font-size: 12px; font-weight: 700; padding: 8px 16px; border-radius: 999px; border: none;
+           cursor: pointer; background: #00DDFF; color: #0A2342; }
+  small { display: block; margin-top: 14px; font-size: 11px; color: #6B7A8D; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo"><i style="height:10px;background:#0B72D7"></i><i style="height:16px;background:#54B5FB"></i><i style="height:22px;background:#00DDFF"></i></div>
+  <h1 id="tit">Preparando o arquivo…</h1>
+  <p id="msg"></p>
+  <button id="de-novo" type="button" hidden>⭳ Baixar de novo</button>
+  <small>Os dados vieram do relatório direto para esta aba, no seu computador; nada é enviado pela internet. Pode fechar esta aba depois do download.</small>
+</div>
+<script>
+(function () {
+  "use strict";
+  var tit = document.getElementById("tit"), msg = document.getElementById("msg"), btn = document.getElementById("de-novo");
+  function erro(t) { tit.textContent = "Não foi possível montar o arquivo"; tit.className = "erro"; msg.textContent = t; }
+
+  // lê os dados e já tira do endereço (não ficam na barra nem num "recarregar")
+  var hash = location.hash.slice(1);
+  if (hash) history.replaceState(null, "", location.pathname);
+  var p = {};
+  hash.split("&").forEach(function (kv) { var i = kv.indexOf("="); if (i > 0) p[kv.slice(0, i)] = kv.slice(i + 1); });
+  if (!p.z) { erro("Esta página é aberta pelo botão Exportar dos relatórios do Power BI. Volte ao relatório e clique em Exportar."); return; }
+
+  var nome = "exportacao.csv";
+  try { nome = decodeURIComponent(p.n || nome).replace(/[\\/:*?"<>|]+/g, "_") || nome; } catch (e) { /* nome padrão */ }
+
+  function bytesDe(b64url) {
+    var b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    var bin = atob(b64), out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  var url = null;
+  function baixar() {
+    var a = document.createElement("a");
+    a.href = url; a.download = nome; document.body.appendChild(a); a.click(); a.remove();
+  }
+
+  try {
+    var ds = new DecompressionStream("gzip");
+    var stream = new Blob([bytesDe(p.z)]).stream().pipeThrough(ds);
+    new Response(stream).blob().then(function (blob) {
+      var tipo = /\.pdf$/i.test(nome) ? "application/pdf" : "text/csv;charset=utf-8";
+      url = URL.createObjectURL(new Blob([blob], { type: tipo }));
+      baixar();
+      tit.textContent = "✓ Download iniciado"; tit.className = "ok";
+      msg.textContent = nome + " · " + (blob.size / 1024 < 1024 ? Math.max(1, Math.round(blob.size / 1024)) + " KB" : (blob.size / 1048576).toFixed(1).replace(".", ",") + " MB");
+      btn.hidden = false;
+      btn.onclick = baixar;
+    }).catch(function () { erro("O conteúdo chegou incompleto. Volte ao relatório e clique em Exportar de novo."); });
+  } catch (e) {
+    erro("Este navegador não conseguiu abrir o arquivo. Use o Chrome ou o Edge atualizados.");
+  }
+})();
+</script>
+</body>
+</html>
