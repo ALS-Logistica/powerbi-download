@@ -43,7 +43,7 @@
   if (hash) history.replaceState(null, "", location.pathname);
   var p = {};
   hash.split("&").forEach(function (kv) { var i = kv.indexOf("="); if (i > 0) p[kv.slice(0, i)] = kv.slice(i + 1); });
-  if (!p.z) {
+  if (!p.z && !(p.zp && p.i)) {
     tit.textContent = "Download dos relatórios Power BI";
     msg.textContent = "Esta página é aberta pelo botão Exportar CSV dos relatórios. Volte ao relatório e clique em Exportar.";
     return;
@@ -59,28 +59,140 @@
     for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
   }
+  function texto(gz) { return new Response(new Blob([gz]).stream().pipeThrough(new DecompressionStream("gzip"))).text(); }
+  function tamanho(n) { return n / 1024 < 1024 ? Math.max(1, Math.round(n / 1024)) + " KB" : (n / 1048576).toFixed(1).replace(".", ",") + " MB"; }
 
   var url = null;
   function baixar() {
     var a = document.createElement("a");
     a.href = url; a.download = nome; document.body.appendChild(a); a.click(); a.remove();
   }
-
-  try {
-    var ds = new DecompressionStream("gzip");
-    var stream = new Blob([bytesDe(p.z)]).stream().pipeThrough(ds);
-    new Response(stream).blob().then(function (blob) {
-      var tipo = /\.pdf$/i.test(nome) ? "application/pdf" : "text/csv;charset=utf-8";
-      url = URL.createObjectURL(new Blob([blob], { type: tipo }));
-      baixar();
-      tit.textContent = "✓ Download iniciado"; tit.className = "ok";
-      msg.textContent = nome + " · " + (blob.size / 1024 < 1024 ? Math.max(1, Math.round(blob.size / 1024)) + " KB" : (blob.size / 1048576).toFixed(1).replace(".", ",") + " MB");
-      btn.hidden = false;
-      btn.onclick = baixar;
-    }).catch(function () { erro("O conteúdo chegou incompleto. Volte ao relatório e clique em Exportar de novo."); });
-  } catch (e) {
-    erro("Este navegador não conseguiu abrir o arquivo. Use o Chrome ou o Edge atualizados.");
+  function entregar(blob, extra) {
+    var tipo = /\.pdf$/i.test(nome) ? "application/pdf" : "text/csv;charset=utf-8";
+    url = URL.createObjectURL(new Blob([blob], { type: tipo }));
+    baixar();
+    tit.textContent = "✓ Download iniciado"; tit.className = "ok";
+    msg.textContent = nome + " · " + tamanho(blob.size) + (extra || "");
+    btn.hidden = false;
+    btn.onclick = baixar;
   }
+
+  if (typeof DecompressionStream === "undefined") { erro("Este navegador não conseguiu abrir o arquivo. Use o Chrome ou o Edge atualizados."); return; }
+
+  // ---------------- um arquivo inteiro no endereço (como sempre foi) ----------------
+  if (!p.i) {
+    new Response(new Blob([bytesDe(p.z)]).stream().pipeThrough(new DecompressionStream("gzip"))).blob()
+      .then(function (blob) { entregar(blob); })
+      .catch(function () { erro("O conteúdo chegou incompleto. Volte ao relatório e clique em Exportar de novo."); });
+    return;
+  }
+
+  // ---------------- arquivo grande: várias partes, UM arquivo no fim ----------------
+  // O relatório abre a parte 1 nesta aba. Esta aba pede o resto direto ao relatório (mensagem entre janelas, sem
+  // internet); se não der, o relatório abre uma aba por parte, cada uma guarda a sua parte neste navegador e esta aba
+  // junta tudo num arquivo só.
+  var id = p.i, k = parseInt(p.k, 10) || 1, total = parseInt(p.t, 10) || 1;
+  if (!/^[a-z0-9]{8,64}$/i.test(id)) { erro("Endereço inválido. Volte ao relatório e clique em Exportar de novo."); return; }
+
+  function abrirBanco() {
+    return new Promise(function (ok, falha) {
+      var r = indexedDB.open("powerbi-download", 1);
+      r.onupgradeneeded = function () { r.result.createObjectStore("partes"); };
+      r.onsuccess = function () { ok(r.result); };
+      r.onerror = function () { falha(r.error); };
+    });
+  }
+  function guardar(db, chave, valor) {
+    return new Promise(function (ok, falha) {
+      var tx = db.transaction("partes", "readwrite"); tx.objectStore("partes").put(valor, chave);
+      tx.oncomplete = function () { ok(); }; tx.onerror = function () { falha(tx.error); };
+    });
+  }
+  function lerTodas(db) {
+    return new Promise(function (ok, falha) {
+      var out = {}, tx = db.transaction("partes", "readonly"), req = tx.objectStore("partes").openCursor();
+      req.onsuccess = function () { var c = req.result; if (c) { out[c.key] = c.value; c.continue(); } };
+      tx.oncomplete = function () { ok(out); }; tx.onerror = function () { falha(tx.error); };
+    });
+  }
+  function apagar(db, filtro) {
+    return lerTodas(db).then(function (todas) {
+      var tx = db.transaction("partes", "readwrite"), st = tx.objectStore("partes");
+      Object.keys(todas).forEach(function (c) { if (filtro(c, todas[c])) st.delete(c); });
+    });
+  }
+
+  // junta as partes: o cabeçalho (e o BOM) só da primeira
+  function montar(gzs) {
+    return Promise.all(gzs.map(texto)).then(function (txts) {
+      var corpo = txts.map(function (t, n) {
+        if (n === 0) return t.replace(/[\r\n]+$/, "");
+        t = t.replace(/^﻿/, "");
+        var q = t.indexOf("\n");
+        return q < 0 ? "" : t.slice(q + 1).replace(/[\r\n]+$/, "");
+      }).filter(function (t) { return t.length; });
+      return new Blob([corpo.join("\r\n")]);
+    });
+  }
+
+  var meu = bytesDe(p.zp || p.z);
+  abrirBanco().then(function (db) {
+    var agora = Date.now();
+    // limpa sobras de exportações antigas (mais de 1 hora)
+    return apagar(db, function (c, v) { return !v || agora - v.ts > 3600000; })
+      .then(function () { return guardar(db, id + "#" + k, { ts: agora, gz: meu }); })
+      .then(function () { return db; });
+  }).then(function (db) {
+    if (k > 1) {
+      tit.textContent = "✓ Parte " + k + " de " + total + " recebida"; tit.className = "ok";
+      msg.textContent = "O arquivo completo é montado e baixado na primeira aba. Esta aba fecha sozinha.";
+      setTimeout(function () { window.close(); }, 2500);
+      return;
+    }
+    tit.textContent = "Juntando as partes…";
+    var pronto = false;
+    function concluir(gzs, origem) {
+      if (pronto) return;
+      pronto = true;
+      montar(gzs).then(function (blob) {
+        entregar(blob, " · " + total + " partes juntadas em 1 arquivo");
+        apagar(db, function (c) { return c.indexOf(id + "#") === 0; });
+      }).catch(function () { erro("Não foi possível juntar as partes. Volte ao relatório e clique em Exportar de novo."); });
+    }
+
+    // 1) pede o resto direto ao relatório (a resposta só vale para este id, gerado no relatório a cada exportação)
+    window.addEventListener("message", function (e) {
+      var d = e.data;
+      if (!d || d.tipo !== "pbi-dl-dados" || d.id !== id || !d.partes || d.partes.length !== total) return;
+      concluir(d.partes.map(function (x) { return new Uint8Array(x); }), "relatório");
+    });
+    function pedir(w, prof) {
+      if (!w || prof > 8) return;
+      try { w.postMessage({ tipo: "pbi-dl-pedido", id: id }, "*"); } catch (e) { /* janela inacessível */ }
+      var n = 0;
+      try { n = w.frames.length; } catch (e) { n = 0; }
+      for (var f = 0; f < n; f++) { try { pedir(w.frames[f], prof + 1); } catch (e) { /* segue */ } }
+    }
+    try { pedir(window.opener, 0); } catch (e) { /* sem janela de origem */ }
+
+    // 2) espera as outras abas guardarem as suas partes
+    var ini = Date.now();
+    (function esperar() {
+      if (pronto) return;
+      lerTodas(db).then(function (todas) {
+        if (pronto) return;
+        var gzs = [], tem = 0;
+        for (var n = 1; n <= total; n++) { var v = todas[id + "#" + n]; if (v) { tem++; gzs.push(v.gz); } }
+        if (tem === total) { concluir(gzs, "abas"); return; }
+        msg.textContent = "Recebidas " + tem + " de " + total + " partes…";
+        if (Date.now() - ini < 45000) { setTimeout(esperar, 400); return; }
+        erro("Chegaram só " + tem + " de " + total + " partes: o navegador bloqueou as outras abas. Permita os pop-ups do portal " +
+             "(ícone na barra de endereço → \"Sempre permitir\") e clique em Exportar de novo.");
+      });
+    })();
+  }).catch(function () {
+    erro("O navegador não deixou guardar os dados nesta aba (modo anônimo ou armazenamento bloqueado). Tente numa janela normal.");
+  });
 })();
 </script>
 </body>
